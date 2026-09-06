@@ -28,13 +28,11 @@ class RadioHoundNode:
     """Represents one physical node, addressed by MAC address or node id."""
  
     def __init__(self, node_id: str):
-        # TODO(C&C / Yankai): confirm whether this should connect via the
-        # Flask API layer, or directly to MQTT (security note: Randy prefers
-        # not direct MQTT long-term).
+        # TODO connect via the Flask API layer, not directly to MQTT 
         pass
  
     def connect(self) -> None:
-        """Establish a connection to the node (via broker or API)."""
+        """Establish a connection to the node (via API)."""
         pass
  
     def disconnect(self) -> None:
