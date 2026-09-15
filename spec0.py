@@ -1,193 +1,86 @@
+"""
+radiohound/core.py -- Stage 1, rebuilt against Randy's dummy API
+(HTTP, not raw MQTT -- see notes below).
 
+This targets a mocked/hardcoded backend right now. The RESPONSE SHAPE is
+expected to match the eventual real API; specific VALUES in that response
+(hardware_type, active, etc.) are just fixture data and shouldn't be
+treated as representative.
+
+Two things are flagged below as # CONFIRM -- resolve with Randy before
+relying on them.
 """
-radiohound -- Stage 0 interface spec (stubs only, no implementation)
- 
-Modeled on the pandas pattern: a general-purpose core (connect / send /
-receive) that knows nothing about *why* you're talking to a node, plus
-three specialized layers built on top of that core -- one per use case
-Chris identified: calibration, debug/iteration, and occupancy mapping.
- 
-Nothing here is implemented. The goal of this file is to nail down
-names and signatures FIRST, circulate it to FPGA DAQ and Command &
-Control for feedback, and only then write real code (Stage 1).
- 
-Open questions that block finalizing this spec are marked inline as
-# TODO(team): ...
-"""
- 
-from typing import Any
- 
- 
-# ---------------------------------------------------------------------------
-# CORE -- domain-agnostic. Doesn't know about calibration, debugging, or
-# mapping. Just: talk to a node, hide the MQTT callback complexity.
-# Equivalent to pandas' DataFrame.
-# ---------------------------------------------------------------------------
- 
-class RadioHoundNode:
-    """Represents one physical node, addressed by MAC address or node id."""
- 
-    def __init__(self, node_id: str):
-        # TODO connect via the Flask API layer, not directly to MQTT 
-        pass
- 
-    def connect(self) -> None:
-        """Establish a connection to the node (via API)."""
-        pass
- 
-    def disconnect(self) -> None:
-        """Cleanly tear down the connection."""
-        pass
- 
-    def send_command(self, command: dict) -> None:
-        """
-        Publish a command to the node. Internally wraps whatever
-        sendMessage.py does in the Icarus repo -- read that file before
-        implementing this for real.
-        """
-        pass
- 
-    def scan(self, freq: float, gain: float = None, mode: str = "fft") -> "ScanResult":
-        """
-        The single most important function in the whole module: publish a
-        scan command, block internally on the MQTT callback, and return a
-        result synchronously -- so the caller never sees the callback at all.
- 
-        # TODO(FPGA DAQ / Dom, Zhiyu): confirm return format -- raw IQ,
-        # FFT bins, periodogram, or already-assembled array.
-        """
-        pass
- 
-    def status(self) -> dict:
-        """Query the node's current state (idle, scanning, error, etc.)."""
-        pass
- 
- 
+
+import base64
+
+import numpy
+import requests
+
+BASE_URL = "http://radiohound2.ee.nd.edu:8000/api"
+
+
 class ScanResult:
-    """
-    Wraps whatever comes back from a scan into one consistent object,
-    regardless of what raw format FPGA DAQ's interface returns.
- 
-    # TODO: decide whether the underlying storage is a NumPy array,
-    # a pandas DataFrame, or DigitalRF (per Randy's proposal).
-    """
-    def __init__(self, data: Any, metadata: dict):
-        self.data = data
-        self.metadata = metadata  # frequency, location, node name, timestamp
- 
- 
-# ---------------------------------------------------------------------------
-# USE CASE 1: CALIBRATION / SWEEP
-# Sequential, single-node. Request a periodogram over MQTT, likely
-# visualized live (e.g. in a Jupyter notebook).
-# Equivalent to pandas' .resample() -- a specialized accessor for one kind
-# of work, built on the same core above.
-# ---------------------------------------------------------------------------
- 
-def sweep(node: RadioHoundNode, freq_start: float, freq_stop: float, step: float) -> "CalibrationCurve":
-    """
-    Run a calibration sweep across a frequency range, calling node.scan()
-    repeatedly under the hood.
- 
-    # TODO: check calibrationIO/ and SoapyCalibCurves in the Icarus repo --
-    # there may already be an existing calibration curve format to match,
-    # rather than inventing a new one.
-    """
-    pass
- 
- 
-def load_calibration(path: str) -> "CalibrationCurve":
-    """Load a previously saved calibration curve from disk."""
-    pass
- 
- 
-def save_calibration(curve: "CalibrationCurve", path: str) -> None:
-    """Save a calibration curve to disk."""
-    pass
- 
- 
-class CalibrationCurve:
-    """Represents a calibration result across a frequency range."""
-    pass
- 
- 
-# ---------------------------------------------------------------------------
-# USE CASE 2: NORMAL USE / DEBUGGING
-# Fast iteration -- stepping through frequencies while actively poking at
-# the system. Optimized for low friction, not for completeness.
-# ---------------------------------------------------------------------------
- 
-def quick_scan(node: RadioHoundNode, freq: float) -> ScanResult:
-    """
-    A minimal-overhead scan for fast, repeated calls at a REPL or notebook.
-    Likely just a thin pass-through to node.scan() with sensible defaults
-    baked in, so the caller doesn't need to specify gain/mode every time.
-    """
-    pass
- 
- 
-def step_frequency(node: RadioHoundNode, current_freq: float, step: float) -> ScanResult:
-    """Convenience for the common 'nudge frequency and rescan' pattern."""
-    pass
- 
- 
-def live_view(node: RadioHoundNode, freq: float, interval: float = 1.0):
-    """
-    A generator that yields ScanResults repeatedly at a fixed interval,
-    for live plotting while debugging.
- 
-    # TODO: confirm whether this should reuse the FPGA DAQ ring-buffer
-    # read pattern directly instead of issuing repeated fresh scans.
-    """
-    pass
- 
- 
-# ---------------------------------------------------------------------------
-# USE CASE 3: OCCUPANCY MAPPING / DATA COLLECTION
-# Multi-node coordination. Save node values as a time series. Needs
-# cross-node timing to be meaningful.
-# ---------------------------------------------------------------------------
- 
-def collect(nodes: list[RadioHoundNode], freq: float, duration: float, interval: float) -> "TimeSeries":
-    """
-    Coordinate scans across multiple nodes over a period of time.
- 
-    # TODO(Time Sync / Jack, Cole, Dom/Zhiyu, Nazim): this function's
-    # usefulness depends entirely on what timestamp precision is actually
-    # available -- confirm before implementing.
-    """
-    pass
- 
- 
-def save_timeseries(ts: "TimeSeries", path: str, format: str = "digitalrf") -> None:
-    """
-    Save collected multi-node data to disk.
- 
-    # TODO: confirm DigitalRF vs. pandas as the default storage format
-    # (Randy's proposal was DigitalRF, since it's already standard for
-    # this kind of RF time-series data).
-    """
-    pass
- 
- 
-class TimeSeries:
-    """Represents time-aligned scan results across one or more nodes."""
-    pass
- 
- 
-# ---------------------------------------------------------------------------
-# STAGE 2 CONVENIENCE (not part of the core three use cases, but the
-# original radiohound.go() idea -- included here to show how it composes
-# from the pieces above rather than being a fourth separate thing)
-# ---------------------------------------------------------------------------
- 
-def go(node_id: str, freq: float, mode: str = "fft") -> ScanResult:
-    """Connect to a node and run one scan, in a single call."""
-    node = RadioHoundNode(node_id)
-    node.connect()
-    return node.scan(freq, mode=mode)
- 
+    """Wraps one scan response into something easy to work with."""
+
+    def __init__(self, response_json):
+        self.raw = response_json
+        self.data = numpy.frombuffer(
+            base64.b64decode(response_json["data"]),
+            dtype=response_json["type"],
+        )
+        self.mac_address = response_json["mac_address"]
+        self.timestamp = response_json["timestamp"]
+        self.center_frequency = response_json["center_frequency"]
+        self.sample_rate = response_json["sample_rate"]
+        self.metadata = response_json["metadata"]      # fmin, fmax, nfft, gps_lock, scan_time, ...
+        self.requested = response_json["requested"]     # what was actually asked for, echoed back
+        self.gps_lock = response_json["metadata"].get("gps_lock")
+
+    def __repr__(self):
+        m = self.metadata
+        return (f"<ScanResult mac={self.mac_address} n={self.data.size} "
+                f"fmin={m.get('fmin')} fmax={m.get('fmax')} gps_lock={self.gps_lock}>")
 
 
+def scan(mac_address, freq, gain=None, base_url=BASE_URL, timeout=10):
+    """
+    Request a scan from a node and return a ScanResult with the decoded
+    array and metadata attached.
+
+    # CONFIRM(Randy): units for `freq` -- the example URL used freq=4,
+    # but a real sample response implies a ~2 GHz requested center
+    # frequency. Need to confirm Hz vs. GHz vs. something else before
+    # this default is trustworthy.
+    # CONFIRM(Randy): gain range -- node capabilities report gain 0-7
+    # (step 1), but the example URL passed gain=30, outside that range.
+    """
+    params = {"freq": freq}
+    if gain is not None:
+        params["gain"] = gain
+
+    resp = requests.get(f"{base_url}/scan/{mac_address}", params=params, timeout=timeout)
+    resp.raise_for_status()
+    return ScanResult(resp.json())
 
 
+def get_node(mac_address, base_url=BASE_URL, timeout=10):
+    """Fetch a node's raw status dict (active, last_update, sensors, ...)."""
+    resp = requests.get(f"{base_url}/node/{mac_address}", timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def is_online(mac_address, base_url=BASE_URL, timeout=10):
+    """
+    Convenience wrapper answering the Stage 2 "is the node online"
+    question directly from the API's own `active` field, rather than
+    inferring it from timeouts or connection errors.
+    """
+    return get_node(mac_address, base_url=base_url, timeout=timeout)["active"]
+
+
+if __name__ == "__main__":
+    import sys
+    result = scan(sys.argv[1], freq=float(sys.argv[2]))
+    print(result)
+    print(result.data[:8])
