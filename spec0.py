@@ -7,8 +7,10 @@ expected to match the eventual real API; specific VALUES in that response
 (hardware_type, active, etc.) are just fixture data and shouldn't be
 treated as representative.
 
-Two things are flagged below as # CONFIRM -- resolve with Randy before
-relying on them.
+freq units (Hz) and gain range (0-7) were confirmed against Icarus's
+rf/scan.py source -- see CONTEXT.md #4. Still open: that source shows the
+real periodogram task takes fmin/fmax (a range), not a single freq -- this
+scan() signature likely needs to change to match before Stage 2.
 """
 
 import base64
@@ -47,12 +49,12 @@ def scan(mac_address, freq, gain=None, base_url=BASE_URL, timeout=10):
     Request a scan from a node and return a ScanResult with the decoded
     array and metadata attached.
 
-    # CONFIRM(Randy): units for `freq` -- the example URL used freq=4,
-    # but a real sample response implies a ~2 GHz requested center
-    # frequency. Need to confirm Hz vs. GHz vs. something else before
-    # this default is trustworthy.
-    # CONFIRM(Randy): gain range -- node capabilities report gain 0-7
-    # (step 1), but the example URL passed gain=30, outside that range.
+    `freq` is in Hz; `gain` should be in [0, 7] (step 1) -- both confirmed
+    against Icarus's rf/scan.py source, see CONTEXT.md #4.
+
+    NOTE: the real periodogram task takes fmin/fmax (a range), not a
+    single freq -- this signature is Stage 1 placeholder shape and likely
+    needs to change before Stage 2 (see CONTEXT.md #10).
     """
     params = {"freq": freq}
     if gain is not None:
