@@ -7,10 +7,15 @@ expected to match the eventual real API; specific VALUES in that response
 (hardware_type, active, etc.) are just fixture data and shouldn't be
 treated as representative.
 
-freq units (Hz) and gain range (0-7) were confirmed against Icarus's
-rf/scan.py source -- see CONTEXT.md #4. Still open: that source shows the
-real periodogram task takes fmin/fmax (a range), not a single freq -- this
-scan() signature likely needs to change to match before Stage 2.
+freq units (Hz) confirmed against Icarus's rf/scan.py source -- see
+CONTEXT.md #4. Gain range is NOT a fixed constant -- real /api/nodes data
+shows it varies per node/sensor (e.g. 0-49.6 continuous for one RTL-SDR
+node, vs. 0-7 step 1 in Randy's earlier fixture data). Read it from
+get_node()/nodestats() per node rather than assuming a shared default.
+
+Still open: rf/scan.py shows the real periodogram task takes fmin/fmax
+(a range), not a single freq -- this scan() signature likely needs to
+change to match before Stage 2.
 """
 
 import base64
@@ -49,8 +54,10 @@ def scan(mac_address, freq, gain=None, base_url=BASE_URL, timeout=10):
     Request a scan from a node and return a ScanResult with the decoded
     array and metadata attached.
 
-    `freq` is in Hz; `gain` should be in [0, 7] (step 1) -- both confirmed
-    against Icarus's rf/scan.py source, see CONTEXT.md #4.
+    `freq` is in Hz. `gain` range varies per node/sensor -- check
+    get_node(mac_address) (or nodestats() in stage0_ideas.py) for the
+    specific node's actual gain_range before picking a value; don't
+    assume a shared default across nodes.
 
     NOTE: the real periodogram task takes fmin/fmax (a range), not a
     single freq -- this signature is Stage 1 placeholder shape and likely
