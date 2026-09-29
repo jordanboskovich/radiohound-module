@@ -1,24 +1,9 @@
 """
 radiohound/core.py -- Stage 1, rebuilt against Randy's dummy API
-(HTTP, not raw MQTT -- see notes below).
-
-This targets a mocked/hardcoded backend right now. The RESPONSE SHAPE is
-expected to match the eventual real API; specific VALUES in that response
-(hardware_type, active, etc.) are just fixture data and shouldn't be
-treated as representative.
-
-freq units (Hz) confirmed against Icarus's rf/scan.py source -- see
-CONTEXT.md #4. Gain range is NOT a fixed constant -- real /api/nodes data
-shows it varies per node/sensor (e.g. 0-49.6 continuous for one RTL-SDR
-node, vs. 0-7 step 1 in Randy's earlier fixture data). Read it from
-get_node()/nodestats() per node rather than assuming a shared default.
-
-Still open: rf/scan.py shows the real periodogram task takes fmin/fmax
-(a range), not a single freq -- this scan() signature likely needs to
-change to match before Stage 2.
 """
 
 import base64
+import time
 
 import numpy
 import requests
@@ -49,27 +34,21 @@ class ScanResult:
                 f"fmin={m.get('fmin')} fmax={m.get('fmax')} gps_lock={self.gps_lock}>")
 
 
+def _get_scan(mac_address, params, base_url, timeout):
+    resp = requests.get(f"{base_url}/scan/{mac_address}", params=params, timeout=timeout)
+    resp.raise_for_status()
+    return ScanResult(resp.json())
+
+
 def scan(mac_address, freq, gain=None, base_url=BASE_URL, timeout=10):
     """
     Request a scan from a node and return a ScanResult with the decoded
     array and metadata attached.
-
-    `freq` is in Hz. `gain` range varies per node/sensor -- check
-    get_node(mac_address) (or nodestats() in stage0_ideas.py) for the
-    specific node's actual gain_range before picking a value; don't
-    assume a shared default across nodes.
-
-    NOTE: the real periodogram task takes fmin/fmax (a range), not a
-    single freq -- this signature is Stage 1 placeholder shape and likely
-    needs to change before Stage 2 (see CONTEXT.md #10).
     """
     params = {"freq": freq}
     if gain is not None:
         params["gain"] = gain
-
-    resp = requests.get(f"{base_url}/scan/{mac_address}", params=params, timeout=timeout)
-    resp.raise_for_status()
-    return ScanResult(resp.json())
+    return _get_scan(mac_address, params, base_url, timeout)
 
 
 def get_node(mac_address, base_url=BASE_URL, timeout=10):
@@ -86,6 +65,83 @@ def is_online(mac_address, base_url=BASE_URL, timeout=10):
     inferring it from timeouts or connection errors.
     """
     return get_node(mac_address, base_url=base_url, timeout=timeout)["active"]
+
+
+def sweep(mac_address, fmin, fmax, step=None, gain=None, doBlock=True,
+          base_url=BASE_URL, timeout=10):
+    """
+    Step across [fmin, fmax) in `step`-sized windows, requesting a
+    periodogram over [frequency, frequency+step) at each one.
+
+    Each step sends `fmin`/`fmax` (not the same request shape as
+    scan(), which sends a single `freq` and is the one confirmed to work
+    against the live dummy API right now. The dummy
+    API doesn't support this shape yet. That's expected, not a bug here:
+    the dummy API needs updating on Randy's end for this to actually
+    return data; until then every step will fail and get skipped (see
+    failure handling below). Written this way anyway because fmin/fmax
+    is the real target shape, not the mock's current limitation.
+
+    doBlock=True (default): run the whole sweep, return a list of
+        ScanResult once it's done.
+    doBlock=False: return a generator yielding each ScanResult as it
+        completes, so a caller can process/plot results as they arrive
+        instead of blocking on the whole sweep.
+
+    `step` defaults to this node's own `sample_rate_max` (from
+    get_node()'s reported sensor capabilities) if not given. This matches real code:
+    Icarus's server-side sweep() (tasks/rf/scan.py) defaults
+    `step` to `receiver.get_ibw()`, a method on its internal `receiver`
+    object. That method isn't reachable from this HTTP client -- it's
+    server-side Python, not an API field -- so `sample_rate_max` is used
+    here as the closest available proxy. NOT confirmed identical to what
+    `get_ibw()` actually returns; revisit if sweep results look off at
+    the edges of each step.
+
+    Per-step pacing mirrors the server-side sweep()'s `time.sleep(0.1)`
+    between steps. The reasoning for that specific value isn't documented
+    in the source and isn't confirmed to apply here (this client is
+    already paced by HTTP round-trip latency, which the tight server-side
+    loop doesn't have) -- kept as a hedge, not a confirmed requirement.
+    Remove/tune it if it proves unnecessary.
+
+    A failed or timed-out scan at a given step is skipped with a printed
+    warning rather than aborting the whole sweep.
+    """
+    if step is None:
+        node = get_node(mac_address, base_url=base_url, timeout=timeout)
+        receiver = next(
+            (s for s in node["sensors"] if s["type"] == "sensors.rf.receiver"), None
+        )
+        if receiver is None:
+            raise ValueError(
+                f"node {mac_address} has no sensors.rf.receiver in its "
+                "capabilities -- can't infer a default step, pass step= explicitly"
+            )
+        step = receiver["capabilities"].get("sample_rate_max")
+        if not step:
+            raise ValueError(
+                f"node {mac_address}'s capabilities have no sample_rate_max -- "
+                "can't infer a default step, pass step= explicitly"
+            )
+
+    def _run():
+        frequency = fmin
+        while frequency < fmax:
+            params = {"fmin": frequency, "fmax": frequency + step}
+            if gain is not None:
+                params["gain"] = gain
+            try:
+                yield _get_scan(mac_address, params, base_url, timeout)
+            except requests.exceptions.RequestException as exc:
+                print(f"WARNING: scan at {frequency}-{frequency + step} Hz "
+                      f"failed ({exc}), skipping")
+            frequency += step
+            time.sleep(0.1)
+
+    if doBlock:
+        return list(_run())
+    return _run()
 
 
 if __name__ == "__main__":

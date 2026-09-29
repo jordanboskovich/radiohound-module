@@ -9,10 +9,11 @@ seen, a design decision that's really a preference call -- it's left as
 a comment/NotImplementedError instead of guessed-at code. Fill in as
 things get confirmed; delete the comment once its question is answered.
 
-`scan(nodename, frequency)` is not repeated here -- it already exists as
-scan(mac_address, freq, gain=None) in spec0.py and works against the
-dummy API. See the Node.scan() note below for how it might connect to
-select().
+`scan(nodename, frequency)` and `sweep()` are not repeated here -- both
+now live in spec0.py (scan(mac_address, freq, gain=None) and
+sweep(mac_address, fmin, fmax, step=None, gain=None, doBlock=True)) and
+work against the dummy API. See the Node.scan() note below for how scan()
+might connect to select().
 """
 
 from spec0 import BASE_URL, get_node, scan
@@ -64,9 +65,9 @@ class Node:
     def __init__(self, mac_address):
         self.mac_address = mac_address
 
-    def scan(self, frequency, gain=None, **kwargs):
+    def scan(self, freq, gain=None, **kwargs):
         """Delegates to spec0.scan() -- no open questions here, just wiring."""
-        return scan(self.mac_address, frequency, gain=gain, **kwargs)
+        return scan(self.mac_address, freq, gain=gain, **kwargs)
 
     def getjoblist(self):
         """
@@ -138,61 +139,3 @@ def getnodes(bbox=None):
         "no confirmed bulk node-listing endpoint yet -- see docstring"
     )
 
-
-def sweep(mac_address, fmin, fmax, step=None, gain=None, doBlock=True,
-          base_url=BASE_URL, timeout=10):
-    """
-    Step across [fmin, fmax) scanning at each point.
-
-    doBlock=True (default): run the whole sweep, return a list of
-        ScanResult once it's done.
-    doBlock=False: return a generator that yields each ScanResult as it
-        completes, so a caller can process/plot results as they arrive
-        instead of blocking on the whole experiment. This is the general
-        pattern requested for functions that run a multi-step experiment,
-        not something specific to sweep() -- once it's proven out here,
-        the same doBlock/generator split likely applies to whatever the
-        occupancy-mapping collect() function ends up looking like too.
-
-    NOT CONFIRMED / undecided before filling in the loop body:
-    - `step` default: rf/scan.py's *server-side* sweep() (CONTEXT.md #4)
-      defaults step to receiver.get_ibw() -- the radio's native
-      instantaneous bandwidth. Unclear whether this client-side sweep()
-      should mirror that, and if so, where that value comes from on the
-      client (nodestats(), once it returns real per-node capabilities
-      rather than the dummy fixture data?).
-    - Per-step pacing: the server-side version sleeps 0.1s between steps.
-      Since each call here is a separate blocking HTTP request rather
-      than a tight server-side loop, unclear whether client-side pacing
-      is needed at all, or whether request latency already provides it.
-    - Failure handling: should one failed/timed-out scan at a given step
-      abort the whole sweep, or get skipped with a warning so the sweep
-      continues? Also undecided whether "failed" should even be possible
-      here given HTTP GETs already raise on non-2xx via raise_for_status()
-      in scan().
-    """
-    if step is None:
-        raise NotImplementedError("step default is undecided -- see docstring")
-
-    def _run():
-        frequency = fmin
-        while frequency < fmax:
-            # DECIDE: is this scan(mac_address, frequency, gain=gain) at
-            # each step (a series of single-point/zero-span requests), or
-            # scan(mac_address, fmin=frequency, fmax=frequency+step, ...)
-            # (a series of small-span periodogram requests)? Both are
-            # plausible reads of what "step across a range" should mean
-            # once scan()'s real signature moves to fmin/fmax (see
-            # CONTEXT.md #10) -- not guessing which without confirming.
-            #
-            # Once decided: `yield result` belongs right here -- that
-            # literal `yield` is what makes _run() a generator function
-            # at all (Python decides this at def-time by scanning for a
-            # `yield` in the body), which is what doBlock=False below is
-            # relying on. Don't lose it during cleanup.
-            raise NotImplementedError("per-step scan call shape is undecided -- see docstring")
-            frequency += step
-
-    if doBlock:
-        return list(_run())
-    return _run()
