@@ -1,5 +1,6 @@
 """
-radiohound/core.py -- Stage 1, rebuilt against Randy's dummy API
+radiohound/core.py -- built against Randy's live API (real scans from
+real nodes, as of Oct 2026)
 """
 
 import base64
@@ -9,6 +10,12 @@ import numpy
 import requests
 
 BASE_URL = "http://radiohound2.ee.nd.edu:8000/api"
+
+# The server gives the node `timeout + 2` seconds before answering 504
+# (Randy's scan_node(), Oct 2026), so the HTTP request has to wait longer
+# than that or we'd give up before the server tells us what happened.
+SERVER_GRACE = 2
+HTTP_MARGIN = 3     # extra on top of that for network latency -- our own pick, not from the API
 
 
 class ScanResult:
@@ -24,9 +31,16 @@ class ScanResult:
         self.timestamp = response_json["timestamp"]
         self.center_frequency = response_json["center_frequency"]
         self.sample_rate = response_json["sample_rate"]
-        self.metadata = response_json["metadata"]      # fmin, fmax, nfft, gps_lock, scan_time, ...
+        self.metadata = response_json["metadata"]      # fmin, fmax, xstart, xstop, nfft, xcount, gps_lock, scan_time, ...
         self.requested = response_json["requested"]     # what was actually asked for, echoed back
         self.gps_lock = response_json["metadata"].get("gps_lock")
+        # Added with the live API. .get() because they've only been seen from
+        # one node -- not confirmed that every node sends them.
+        self.latitude = response_json.get("latitude")
+        self.longitude = response_json.get("longitude")
+        self.altitude = response_json.get("altitude")
+        self.batch = response_json.get("batch")
+        self.software_version = response_json.get("software_version")
 
     def __repr__(self):
         m = self.metadata
@@ -34,28 +48,66 @@ class ScanResult:
                 f"fmin={m.get('fmin')} fmax={m.get('fmax')} gps_lock={self.gps_lock}>")
 
 
+def _get_json(url, params=None, timeout=10):
+    """
+    GET `url` and return the decoded JSON body. API errors come back as
+    {"detail": ...} (e.g. "Node not found", "Node did not respond in
+    time"); those are raised as requests.exceptions.HTTPError with the
+    detail in the message.
+    """
+    resp = requests.get(url, params=params, timeout=timeout)
+    try:
+        body = resp.json()
+    except ValueError:
+        if resp.ok:
+            raise
+        body = {"detail": resp.text}
+    if not resp.ok or (isinstance(body, dict) and "detail" in body):
+        detail = body.get("detail") if isinstance(body, dict) else body
+        raise requests.exceptions.HTTPError(
+            f"{resp.status_code} from {resp.url}: {detail}", response=resp
+        )
+    return body
+
+
 def _get_scan(mac_address, params, base_url, timeout):
-    resp = requests.get(f"{base_url}/scan/{mac_address}", params=params, timeout=timeout)
-    resp.raise_for_status()
-    return ScanResult(resp.json())
+    return ScanResult(_get_json(f"{base_url}/scan/{mac_address}", params, timeout))
 
 
-def scan(mac_address, freq, gain=None, base_url=BASE_URL, timeout=10):
+def scan(mac_address, freq, gain=None, base_url=BASE_URL, timeout=10,
+         rbw=None, batch=None):
     """
     Request a scan from a node and return a ScanResult with the decoded
     array and metadata attached.
+
+    freq: center frequency in Hz. The API itself takes MHz; the
+        conversion happens here so everything in this module stays in Hz,
+        matching the values the API sends back.
+    gain, rbw, batch: left out of the request when None, so the server's
+        own defaults apply (gain=1, rbw=23437.5, batch=0 as of Oct 2026).
+        The server only accepts whole-number gain and batch.
+    timeout: whole seconds the node is given to respond. Sent to the
+        server, which waits a little longer than that before giving up;
+        the HTTP request waits a little longer again.
+
+    The server currently turns every request into a zero-span scan: the
+    result is the node's native window centered on `freq`, not a span
+    you choose.
     """
-    params = {"freq": freq}
+    params = {"freq": freq / 1e6, "timeout": timeout}
     if gain is not None:
         params["gain"] = gain
-    return _get_scan(mac_address, params, base_url, timeout)
+    if rbw is not None:
+        params["rbw"] = rbw
+    if batch is not None:
+        params["batch"] = batch
+    return _get_scan(mac_address, params, base_url,
+                     timeout + SERVER_GRACE + HTTP_MARGIN)
 
 
 def get_node(mac_address, base_url=BASE_URL, timeout=10):
     """Fetch a node's raw status dict (active, last_update, sensors, ...)."""
-    resp = requests.get(f"{base_url}/node/{mac_address}", timeout=timeout)
-    resp.raise_for_status()
-    return resp.json()
+    return _get_json(f"{base_url}/node/{mac_address}", timeout=timeout)
 
 
 def is_online(mac_address, base_url=BASE_URL, timeout=10):
@@ -73,14 +125,14 @@ def sweep(mac_address, fmin, fmax, step=None, gain=None, doBlock=True,
     Step across [fmin, fmax) in `step`-sized windows, requesting a
     periodogram over [frequency, frequency+step) at each one.
 
-    Each step sends `fmin`/`fmax` (not the same request shape as
-    scan(), which sends a single `freq` and is the one confirmed to work
-    against the live dummy API right now. The dummy
-    API doesn't support this shape yet. That's expected, not a bug here:
-    the dummy API needs updating on Randy's end for this to actually
-    return data; until then every step will fail and get skipped (see
-    failure handling below). Written this way anyway because fmin/fmax
-    is the real target shape, not the mock's current limitation.
+    Each step sends `fmin`/`fmax` in Hz -- not the same request shape as
+    scan(), which sends a single `freq`. The live API doesn't accept this
+    shape (as of Oct 2026 its scan endpoint takes only `freq` and always
+    does a zero-span scan; how to request spans/sweeps is still to be
+    agreed with Randy). That's expected, not a bug here: until the API
+    supports it every step will fail and get skipped (see failure
+    handling below). Written this way anyway because fmin/fmax is the
+    real target shape, not the API's current limitation.
 
     doBlock=True (default): run the whole sweep, return a list of
         ScanResult once it's done.
