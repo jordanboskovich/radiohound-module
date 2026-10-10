@@ -10,10 +10,10 @@ a comment/NotImplementedError instead of guessed-at code. Fill in as
 things get confirmed; delete the comment once its question is answered.
 
 `scan(nodename, frequency)` and `sweep()` are not repeated here -- both
-now live in spec0.py (scan(mac_address, freq, gain=None) and
-sweep(mac_address, fmin, fmax, step=None, gain=None, doBlock=True)) and
-work against the dummy API. See the Node.scan() note below for how scan()
-might connect to select().
+now live in spec0.py (scan(mac_address, freq, gain=None, ...) and
+sweep_beta(mac_address, fmin, fmax, gain=None, rbw=None, doBlock=True))
+and work against the live API. See the Node.scan() note below for how
+scan() might connect to select().
 """
 
 from spec0 import BASE_URL, get_node, scan
@@ -22,19 +22,14 @@ from spec0 import BASE_URL, get_node, scan
 def nodestats(mac_address, base_url=BASE_URL, timeout=10):
     """
     What can this node do -- its sensors and each sensor's capabilities
-    (gain range, frequency range, sample rate range, etc).
+    (gain range, frequency range, sample rate, calibration data, ...).
 
-    This one we mostly know: the confirmed dummy /api/node/<mac> response
-    already includes this under `sensors`:
+    Thin wrapper around get_node(), which returns real node data:
         {"sensors": [{"type": "sensors.rf.receiver", "capabilities": {...}}]}
-    So this is a thin wrapper around get_node().
 
-    CAVEAT: the dummy API is mocked/hardcoded -- trust the shape, not
-    that every real node has exactly one `sensors.rf.receiver` entry.
-    Once this hits real nodes, confirm whether multi-sensor nodes are
-    a real thing worth handling here (e.g. a node with both an RF
-    receiver and a GPS/locationing sensor -- `rf/scan.py` references
-    'sensors.locationing' separately from 'sensors.rf.receiver').
+    As of Oct 2026, of 36 registered nodes: 25 report exactly one
+    sensors.rf.receiver, 11 report no sensors (returns []). None report
+    more than one, so multi-sensor handling is still untested.
     """
     node = get_node(mac_address, base_url=base_url, timeout=timeout)
     return node["sensors"]
@@ -71,28 +66,18 @@ class Node:
 
     def getjoblist(self):
         """
-        List jobs/tasks currently running or queued on this node -- e.g.
-        to answer CONTEXT.md Stage 2's "is this node busy right now"
-        question directly, instead of inferring busy-ness from a failed
-        or slow scan() call.
+        List jobs/tasks running or queued on this node -- to answer "is
+        this node busy right now" without inferring it from a slow scan().
 
-        NOT CONFIRMED: no endpoint for this has shown up yet. The dummy
-        API only has /api/node/<mac> (status: active/last_update/sensors)
-        and /api/scan/<mac> (request a scan) -- neither obviously exposes
-        a job queue.
-
-        Icarus's private repo has a `tasks/` folder (CONTEXT.md #9,
-        listed but not yet read) that's the most likely place a
-        job/queue/status concept would live, given task_name and
-        batch_id already show up in the scan task payloads reviewed so
-        far (see rf/scan.py in CONTEXT.md #4). If you find something in
-        there with "queue", "status", or "job" in the name, paste it in
-        -- that would tell us what a "job" looks like (state field?
-        keyed by batch_id?) and whether it's reachable over HTTP or only
-        over MQTT.
+        NOT WRITTEN -- the API has no per-node job list (as of Oct 2026):
+        - Jobs exist, but under experiments/sessions: POST
+          /api/sessions/<id>/job creates one, GET /api/jobs/<job_id>
+          reads one. Nothing lists jobs by node.
+        - GET /api/node/<mac>/scan-stats exists; not explored.
+        - ASK RANDY: how should a client tell that a node is busy?
         """
         raise NotImplementedError(
-            "no confirmed API endpoint for per-node job/task lists yet -- see docstring"
+            "the API has no per-node job list yet -- see docstring"
         )
 
 
@@ -112,30 +97,17 @@ def getnodes(bbox=None):
     Tell me all nodes that are online, optionally filtered to a
     geographic box.
 
-    NOT CONFIRMED -- two separate unknowns, don't guess at either:
-
-    1. Is there a bulk "list all nodes" endpoint at all? Everything
-       confirmed so far (/api/node/<mac>, /api/scan/<mac>) is keyed by a
-       mac_address you already have to know going in. Need to ask Randy
-       (or check the public github.com/ndwireless/radiohound repo's
-       docs/scripts, per CONTEXT.md #9) whether something like
-       `/api/nodes` exists, and if so what fields it returns per node.
-
-    2. If a bulk endpoint exists, does it include location? The
-       confirmed /api/node/<mac> shape (CONTEXT.md #3) does NOT include
-       lat/lon -- it's id/active/last_update/ip_address/hardware_type/
-       sensors/git_branch. Scan *payloads* do carry latitude/longitude/
-       altitude (seen in rf/scan.py's periodogram()/raw() payloads,
-       sourced from the node's GPS sensor) -- but that's a per-scan GPS
-       reading, not obviously the same thing as a static registry
-       location you could filter on without having already scanned every
-       candidate node. Don't assume these are interchangeable without
-       confirming.
-
-    bbox format itself (corners? center+radius? which coordinate order?)
-    is also undecided -- not worth bikeshedding before (1) is answered.
+    NOT WRITTEN. What's known (as of Oct 2026):
+    - GET /api/nodes exists, no auth. Returns {"nodes": [...], "groups":
+      [...]}; each node has the same fields as /api/node/<mac>, including
+      `active`. So the unfiltered version is writable today.
+    - Those node entries have no location. GET /api/nodes/gps exists but
+      returned 401 Not authenticated -- the bbox filter is blocked on that.
+    - Scan responses carry latitude/longitude, but that is a per-scan
+      reading; not confirmed to equal a node's registered location.
+    - bbox format (corners? center+radius? coordinate order?) undecided.
     """
     raise NotImplementedError(
-        "no confirmed bulk node-listing endpoint yet -- see docstring"
+        "not written yet -- /api/nodes exists, location filter is blocked; see docstring"
     )
 

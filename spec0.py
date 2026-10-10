@@ -11,11 +11,10 @@ import requests
 
 BASE_URL = "http://radiohound2.ee.nd.edu:8000/api"
 
-# The server gives the node `timeout + 2` seconds before answering 504
-# (Randy's scan_node(), Oct 2026), so the HTTP request has to wait longer
-# than that or we'd give up before the server tells us what happened.
+# The server waits `timeout + 2` s for the node before answering 504; the
+# HTTP request must outlast that. HTTP_MARGIN is our own pick, not from the API.
 SERVER_GRACE = 2
-HTTP_MARGIN = 3     # extra on top of that for network latency -- our own pick, not from the API
+HTTP_MARGIN = 3
 
 
 class ScanResult:
@@ -34,8 +33,7 @@ class ScanResult:
         self.metadata = response_json["metadata"]      # fmin, fmax, xstart, xstop, nfft, xcount, gps_lock, scan_time, ...
         self.requested = response_json["requested"]     # what was actually asked for, echoed back
         self.gps_lock = response_json["metadata"].get("gps_lock")
-        # Added with the live API. .get() because they've only been seen from
-        # one node -- not confirmed that every node sends them.
+        # Live-API fields; .get() since only seen from one node so far.
         self.latitude = response_json.get("latitude")
         self.longitude = response_json.get("longitude")
         self.altitude = response_json.get("altitude")
@@ -50,10 +48,8 @@ class ScanResult:
 
 def _get_json(url, params=None, timeout=10):
     """
-    GET `url` and return the decoded JSON body. API errors come back as
-    {"detail": ...} (e.g. "Node not found", "Node did not respond in
-    time"); those are raised as requests.exceptions.HTTPError with the
-    detail in the message.
+    GET `url`, return the JSON body. API errors ({"detail": ...}) are
+    raised as requests.exceptions.HTTPError with the detail in the message.
     """
     resp = requests.get(url, params=params, timeout=timeout)
     try:
@@ -77,22 +73,15 @@ def _get_scan(mac_address, params, base_url, timeout):
 def scan(mac_address, freq, gain=None, base_url=BASE_URL, timeout=10,
          rbw=None, batch=None):
     """
-    Request a scan from a node and return a ScanResult with the decoded
-    array and metadata attached.
+    Request one scan and return a ScanResult.
 
-    freq: center frequency in Hz. The API itself takes MHz; the
-        conversion happens here so everything in this module stays in Hz,
-        matching the values the API sends back.
-    gain, rbw, batch: left out of the request when None, so the server's
-        own defaults apply (gain=1, rbw=23437.5, batch=0 as of Oct 2026).
-        The server only accepts whole-number gain and batch.
-    timeout: whole seconds the node is given to respond. Sent to the
-        server, which waits a little longer than that before giving up;
-        the HTTP request waits a little longer again.
+    freq: center frequency in Hz (converted to MHz for the API).
+    gain, rbw, batch: omitted when None, so server defaults apply
+        (gain=1, rbw=23437.5, batch=0 as of Oct 2026). gain and batch
+        must be whole numbers.
+    timeout: whole seconds the node gets to respond.
 
-    The server currently turns every request into a zero-span scan: the
-    result is the node's native window centered on `freq`, not a span
-    you choose.
+    Always zero-span: returns the node's native window centered on freq.
     """
     params = {"freq": freq / 1e6, "timeout": timeout}
     if gain is not None:
@@ -119,81 +108,76 @@ def is_online(mac_address, base_url=BASE_URL, timeout=10):
     return get_node(mac_address, base_url=base_url, timeout=timeout)["active"]
 
 
-def sweep(mac_address, fmin, fmax, step=None, gain=None, doBlock=True,
-          base_url=BASE_URL, timeout=10):
+def sweep_beta(mac_address, fmin, fmax, gain=None, rbw=None, doBlock=True,
+               base_url=BASE_URL, timeout=10):
     """
-    Step across [fmin, fmax) in `step`-sized windows, requesting a
-    periodogram over [frequency, frequency+step) at each one.
+    Cover [fmin, fmax] Hz with back-to-back zero-span scans. Returns a
+    list of ScanResult (doBlock=True) or a generator (doBlock=False).
+    A failed step is printed and skipped.
 
-    Each step sends `fmin`/`fmax` in Hz -- not the same request shape as
-    scan(), which sends a single `freq`. The live API doesn't accept this
-    shape (as of Oct 2026 its scan endpoint takes only `freq` and always
-    does a zero-span scan; how to request spans/sweeps is still to be
-    agreed with Randy). That's expected, not a bug here: until the API
-    supports it every step will fail and get skipped (see failure
-    handling below). Written this way anyway because fmin/fmax is the
-    real target shape, not the API's current limitation.
-
-    doBlock=True (default): run the whole sweep, return a list of
-        ScanResult once it's done.
-    doBlock=False: return a generator yielding each ScanResult as it
-        completes, so a caller can process/plot results as they arrive
-        instead of blocking on the whole sweep.
-
-    `step` defaults to this node's own `sample_rate_max` (from
-    get_node()'s reported sensor capabilities) if not given. This matches real code:
-    Icarus's server-side sweep() (tasks/rf/scan.py) defaults
-    `step` to `receiver.get_ibw()`, a method on its internal `receiver`
-    object. That method isn't reachable from this HTTP client -- it's
-    server-side Python, not an API field -- so `sample_rate_max` is used
-    here as the closest available proxy. NOT confirmed identical to what
-    `get_ibw()` actually returns; revisit if sweep results look off at
-    the edges of each step.
-
-    Per-step pacing mirrors the server-side sweep()'s `time.sleep(0.1)`
-    between steps. The reasoning for that specific value isn't documented
-    in the source and isn't confirmed to apply here (this client is
-    already paced by HTTP round-trip latency, which the tight server-side
-    loop doesn't have) -- kept as a hedge, not a confirmed requirement.
-    Remove/tune it if it proves unnecessary.
-
-    A failed or timed-out scan at a given step is skipped with a printed
-    warning rather than aborting the whole sweep.
+    Beta: works with today's API, on these assumptions:
+    - API is zero-span only: each scan is one capture centered on freq.
+    - Capture width is read from a probe scan at fmin and assumed constant
+      across the band (24 MHz at all four frequencies tried, 100 MHz-4.4 GHz).
+    - Neighbouring captures share one edge point; results are not stitched.
+    - Captures are sequential (~0.3 s apart), not simultaneous.
+    - The last capture can extend past fmax.
+    - The 0.1 s pause is copied from Icarus's sweep; need unconfirmed.
+    - Only tested on node 3484e4f58836.
     """
-    if step is None:
-        node = get_node(mac_address, base_url=base_url, timeout=timeout)
-        receiver = next(
-            (s for s in node["sensors"] if s["type"] == "sensors.rf.receiver"), None
-        )
-        if receiver is None:
-            raise ValueError(
-                f"node {mac_address} has no sensors.rf.receiver in its "
-                "capabilities -- can't infer a default step, pass step= explicitly"
-            )
-        step = receiver["capabilities"].get("sample_rate_max")
-        if not step:
-            raise ValueError(
-                f"node {mac_address}'s capabilities have no sample_rate_max -- "
-                "can't infer a default step, pass step= explicitly"
-            )
-
     def _run():
-        frequency = fmin
-        while frequency < fmax:
-            params = {"fmin": frequency, "fmax": frequency + step}
-            if gain is not None:
-                params["gain"] = gain
+        probe = scan(mac_address, fmin, gain=gain, base_url=base_url,
+                     timeout=timeout, rbw=rbw)
+        width = probe.metadata["fmax"] - probe.metadata["fmin"]
+        edge = fmin
+        while edge < fmax:
             try:
-                yield _get_scan(mac_address, params, base_url, timeout)
+                yield scan(mac_address, edge + width / 2, gain=gain,
+                           base_url=base_url, timeout=timeout, rbw=rbw)
             except requests.exceptions.RequestException as exc:
-                print(f"WARNING: scan at {frequency}-{frequency + step} Hz "
+                print(f"WARNING: scan at {edge}-{edge + width} Hz "
                       f"failed ({exc}), skipping")
-            frequency += step
+            edge += width
             time.sleep(0.1)
 
     if doBlock:
         return list(_run())
     return _run()
+
+
+# ---------------------------------------------------------------------------
+# sweep() -- the real one. NOT IMPLEMENTED: every "ASK RANDY" below is a
+# decision about what the API should take in / send back.
+# ---------------------------------------------------------------------------
+# def sweep(mac_address, fmin, fmax, gain=None, rbw=None, doBlock=True,
+#           base_url=BASE_URL, timeout=10):
+#     """One spectrum covering [fmin, fmax] Hz."""
+#
+#     # ASK RANDY 1 -- request shape: fmin/fmax, freq/span, or a separate
+#     #   /sweep endpoint? MHz (like freq today) or Hz (like everything returned)?
+#     params = {"fmin": fmin, "fmax": fmax}
+#
+#     # ASK RANDY 2 -- who steps and stitches: node (Icarus's periodogram
+#     #   already joins captures for wide spans), server, or this client?
+#     #   Node/server -> one request, as below. Client -> needs 3.
+#     # ASK RANDY 3 -- capture width per node: can capabilities report it?
+#     #   (48 MHz sample rate gives 24 MHz here; RTL-SDR nodes unknown.)
+#
+#     # ASK RANDY 4 -- gain: valid values (node reports -10..35 step 3, API
+#     #   accepted 1 and 99)? Default? One gain for the whole sweep?
+#     # ASK RANDY 5 -- batch: meant for grouping the steps of one sweep?
+#
+#     # ASK RANDY 6 -- timing: timeout for a long sweep (server waits
+#     #   timeout + 2)? Settle time between retunes? Node busy/locked?
+#     result = _get_scan(mac_address, params, base_url, timeout)
+#
+#     # ASK RANDY 7 -- response shape: one array with xstart/xstop/xcount for
+#     #   the whole span, or a list of segments? Per-segment timestamps?
+#     #   Size limit for wide spans?
+#     # ASK RANDY 8 -- data units: watts? calibrated? gain-corrected?
+#     # ASK RANDY 9 -- partial failure mid-sweep: what comes back?
+#     # ASK RANDY 10 -- streaming results as they arrive (doBlock=False)?
+#     return result
 
 
 if __name__ == "__main__":

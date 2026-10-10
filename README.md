@@ -7,35 +7,54 @@ dashboard and hand-rolled MQTT as the way to run experiments.
 
 Owner: Jordan Boskovich · RadioHound STRAND, Fall 2026.
 
-## Status
+## Status (Oct 10, 2026)
 
-**Stage 1** (single-node scan against Randy's dummy HTTP API). See
-[CONTEXT.md](CONTEXT.md) for full project context, the staged plan, and
-open questions being tracked.
+**Stage 1 works against the live API**: `scan()` returns real data from a
+real node at `http://radiohound2.ee.nd.edu:8000/api/`. Tested on one node
+(`3484e4f58836`) so far.
+
+Sweeps work in a beta form only (`sweep_beta()`). The API currently
+supports single zero-span scans, so the real `sweep()` is a commented-out
+draft in `spec0.py` listing the decisions still to be made with Randy.
 
 ## Files
 
-- [spec0.py](spec0.py) — current Stage 1 code. `scan()`, `get_node()`,
-  `is_online()`, and a `ScanResult` wrapper, built against the dummy API at
-  `http://radiohound2.ee.nd.edu:8000/api/`.
+- [spec0.py](spec0.py) — the working code:
+  - `scan()` — one scan from one node, returned as a `ScanResult`
+  - `get_node()`, `is_online()` — node status
+  - `sweep_beta()` — covers a band with back-to-back scans
+  - commented-out `sweep()` — open API design questions
+- [stage0_ideas.py](stage0_ideas.py) — draft interface ideas: `nodestats()`,
+  `select()` / `Node` (working), `getnodes()`, `Node.getjoblist()` (stubs).
+- `CONTEXT.md` — full project context, findings log and open questions.
+  Kept locally; not tracked in this repo.
 
 ## Design
 
 One general-purpose core (connect / send a command / get data back) plus
 thin, specialized layers per use case — calibration/sweep, fast
 debugging, and multi-node occupancy mapping — the same pattern as pandas'
-`DataFrame` plus its accessors. See `CONTEXT.md` §5–6 for the reasoning
-and §7 for the staged rollout plan.
+`DataFrame` plus its accessors.
 
-## Quick usage (Stage 1)
+## Quick usage
+
+All frequencies are in **Hz**.
 
 ```python
-from spec0 import scan, get_node, is_online
+from spec0 import scan, is_online, sweep_beta
 
-result = scan("<mac_address>", freq=2000e6, gain=1)
-print(result)
+result = scan("<mac_address>", freq=4444e6, gain=4)
+print(result)            # summary
+print(result.data)       # numpy array of power values
+print(result.metadata)   # fmin, fmax, nfft, xcount, ...
 
 print(is_online("<mac_address>"))
+
+results = sweep_beta("<mac_address>", fmin=4400e6, fmax=4448e6)
 ```
+
+Each scan returns the node's native window centered on `freq` (24 MHz wide
+on the node tested). Errors from the API, such as an unknown node, are
+raised as `requests.exceptions.HTTPError` with the server's message.
 
 Requires `numpy` and `requests`.
