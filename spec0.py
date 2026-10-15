@@ -17,6 +17,14 @@ SERVER_GRACE = 2
 HTTP_MARGIN = 3
 
 
+def frequency_bins(xstart, xstop, xcount):
+    """
+    Frequency in Hz of each power value, lowest first -- for plotting.
+    Assumes each value sits at its bin's center. Periodograms only.
+    """
+    return numpy.linspace(xstart, xstop, xcount)
+
+
 class ScanResult:
     """Wraps one scan response into something easy to work with."""
 
@@ -39,6 +47,12 @@ class ScanResult:
         self.altitude = response_json.get("altitude")
         self.batch = response_json.get("batch")
         self.software_version = response_json.get("software_version")
+
+    @property
+    def frequencies(self):
+        """Frequency in Hz of each value in .data (see frequency_bins())."""
+        m = self.metadata
+        return frequency_bins(m["xstart"], m["xstop"], m["xcount"])
 
     def __repr__(self):
         m = self.metadata

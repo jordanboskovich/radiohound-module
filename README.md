@@ -41,12 +41,15 @@ debugging, and multi-node occupancy mapping — the same pattern as pandas'
 All frequencies are in **Hz**.
 
 ```python
+import matplotlib.pyplot as plt
 from spec0 import scan, is_online, sweep_beta
 
 result = scan("<mac_address>", freq=4444e6, gain=4)
 print(result)            # summary
 print(result.data)       # numpy array of power values
 print(result.metadata)   # fmin, fmax, nfft, xcount, ...
+
+plt.plot(result.frequencies, result.data)   # frequency (Hz) of each value
 
 print(is_online("<mac_address>"))
 
