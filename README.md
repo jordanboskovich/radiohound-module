@@ -46,7 +46,7 @@ from spec0 import scan, is_online, sweep_beta
 
 result = scan("<mac_address>", freq=4444e6, gain=4)
 print(result)            # summary
-print(result.data)       # numpy array of power values
+print(result.data)       # numpy array of power per bin, in watts
 print(result.metadata)   # fmin, fmax, nfft, xcount, ...
 
 plt.plot(result.frequencies, result.data)   # frequency (Hz) of each value

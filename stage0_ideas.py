@@ -101,8 +101,9 @@ def getnodes(bbox=None):
     - GET /api/nodes exists, no auth. Returns {"nodes": [...], "groups":
       [...]}; each node has the same fields as /api/node/<mac>, including
       `active`. So the unfiltered version is writable today.
-    - Those node entries have no location. GET /api/nodes/gps exists but
-      returned 401 Not authenticated -- the bbox filter is blocked on that.
+    - Location is only returned to logged-in users (anonymous callers get
+      a reduced node view; /api/nodes/gps returns 401). The bbox filter
+      is blocked on login.
     - Scan responses carry latitude/longitude, but that is a per-scan
       reading; not confirmed to equal a node's registered location.
     - bbox format (corners? center+radius? coordinate order?) undecided.

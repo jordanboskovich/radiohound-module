@@ -30,6 +30,8 @@ class ScanResult:
 
     def __init__(self, response_json):
         self.raw = response_json
+        # Power per frequency bin, watts (per Chris, Oct 2026). Nominal
+        # only on nodes without calibration data.
         self.data = numpy.frombuffer(
             base64.b64decode(response_json["data"]),
             dtype=response_json["type"],
@@ -175,11 +177,12 @@ def sweep_beta(mac_address, fmin, fmax, gain=None, rbw=None, doBlock=True,
 #     #   already joins captures for wide spans), server, or this client?
 #     #   Node/server -> one request, as below. Client -> needs 3.
 #     # ASK RANDY 3 -- capture width per node: can capabilities report it?
-#     #   (48 MHz sample rate gives 24 MHz here; RTL-SDR nodes unknown.)
+#     #   (24 MHz on the RadioHound board, 2.56 MHz on an RTL-SDR; not
+#     #   derivable from sample rate.)
 #
 #     # ASK RANDY 4 -- gain: valid values (node reports -10..35 step 3, API
 #     #   accepted 1 and 99)? Default? One gain for the whole sweep?
-#     # ASK RANDY 5 -- batch: meant for grouping the steps of one sweep?
+#     # ANSWERED 5 -- batch is unused (dashboard code says so). Drop it?
 #
 #     # ASK RANDY 6 -- timing: timeout for a long sweep (server waits
 #     #   timeout + 2)? Settle time between retunes? Node busy/locked?
@@ -188,7 +191,8 @@ def sweep_beta(mac_address, fmin, fmax, gain=None, rbw=None, doBlock=True,
 #     # ASK RANDY 7 -- response shape: one array with xstart/xstop/xcount for
 #     #   the whole span, or a list of segments? Per-segment timestamps?
 #     #   Size limit for wide spans?
-#     # ASK RANDY 8 -- data units: watts? calibrated? gain-corrected?
+#     # ASK RANDY 8 -- units answered: watts per bin. Tag units/calibrated
+#     #   in each payload? Gain-corrected?
 #     # ASK RANDY 9 -- partial failure mid-sweep: what comes back?
 #     # ASK RANDY 10 -- streaming results as they arrive (doBlock=False)?
 #     return result
