@@ -1,21 +1,20 @@
 # radiohound-module
 
 A Python module giving experimenters a simple, synchronous interface to
-RadioHound sensor nodes — no MQTT callback handling required. Built for the
-Wireless Institute (Notre Dame), replacing Icarus's non-scriptable web
+RadioHound sensor nodes — no MQTT callback handling required. Built for Notre Dame's
+Wireless Institute, replacing Icarus's non-scriptable web
 dashboard and hand-rolled MQTT as the way to run experiments.
 
 Owner: Jordan Boskovich · RadioHound STRAND, Fall 2026.
 
-## Status (Oct 10, 2026)
+## Status
 
 **Stage 1 works against the live API**: `scan()` returns real data from a
-real node at `http://radiohound2.ee.nd.edu:8000/api/`. Tested on one node
-(`3484e4f58836`) so far.
+real node at `http://radiohound2.ee.nd.edu:8000/api/`. 
 
 Sweeps work in a beta form only (`sweep_beta()`). The API currently
 supports single zero-span scans, so the real `sweep()` is a commented-out
-draft in `spec0.py` listing the decisions still to be made with Randy.
+draft in `spec0.py.'
 
 ## Files
 
@@ -26,8 +25,6 @@ draft in `spec0.py` listing the decisions still to be made with Randy.
   - commented-out `sweep()` — open API design questions
 - [stage0_ideas.py](stage0_ideas.py) — draft interface ideas: `nodestats()`,
   `select()` / `Node` (working), `getnodes()`, `Node.getjoblist()` (stubs).
-- `CONTEXT.md` — full project context, findings log and open questions.
-  Kept locally; not tracked in this repo.
 
 ## Design
 
@@ -46,7 +43,7 @@ from spec0 import scan, is_online, sweep_beta
 
 result = scan("<mac_address>", freq=4444e6, gain=4)
 print(result)            # summary
-print(result.data)       # numpy array of power per bin, in watts
+print(result.data)       # numpy array of power per bin, in Watts
 print(result.metadata)   # fmin, fmax, nfft, xcount, ...
 
 plt.plot(result.frequencies, result.data)   # frequency (Hz) of each value
