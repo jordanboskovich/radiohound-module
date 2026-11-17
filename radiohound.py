@@ -1,7 +1,7 @@
 """
-radiohound/core.py -- built against Randy's API on the radiohound_app
-branch api_function_specs (Nov 2026; not deployed yet). All frequencies
-are Hz, in requests and responses.
+radiohound -- built against Randy's API on the radiohound_app branch
+api_function_specs (Nov 2026; not deployed yet). All frequencies are Hz,
+in requests and responses.
 """
 
 import base64
@@ -22,18 +22,54 @@ HTTP_MARGIN = 3
 CONNECT_TIMEOUT = 5
 
 
-def frequency_bins(xstart, xstop, xcount):
+# --- HTTP helpers ------------------------------------------------------------
+
+def _query(**params):
+    """Drop None (so server defaults apply); send bools as true/false."""
+    query = {}
+    for key, value in params.items():
+        if value is None:
+            continue
+        query[key] = ("true" if value else "false") if isinstance(value, bool) else value
+    return query
+
+
+def _raise_api_error(resp):
+    """Raise requests.exceptions.HTTPError carrying the server's {"detail": ...}."""
+    try:
+        body = resp.json()
+    except ValueError:
+        body = {"detail": resp.text}
+    detail = body.get("detail") if isinstance(body, dict) else body
+    raise requests.exceptions.HTTPError(
+        f"{resp.status_code} from {resp.url}: {detail}", response=resp
+    )
+
+
+def _get_json(url, params=None, timeout=10):
     """
-    Frequency in Hz of each power value, lowest first -- for plotting.
-    Assumes each value sits at its bin's center. Periodograms only.
+    GET `url`, return the JSON body. API errors ({"detail": ...}) are
+    raised as requests.exceptions.HTTPError with the detail in the message.
     """
-    return numpy.linspace(xstart, xstop, xcount)
+    resp = requests.get(url, params=params, timeout=timeout)
+    if not resp.ok:
+        _raise_api_error(resp)
+    body = resp.json()
+    if isinstance(body, dict) and "detail" in body:
+        _raise_api_error(resp)
+    return body
+
+
+def _http_wait(timeout):
+    return timeout + SERVER_GRACE + HTTP_MARGIN
 
 
 def _decode(response_json):
     return numpy.frombuffer(base64.b64decode(response_json["data"]),
                             dtype=response_json["type"])
 
+
+# --- Result types ------------------------------------------------------------
 
 class ScanResult:
     """Wraps one periodogram response into something easy to work with."""
@@ -95,15 +131,6 @@ class RawResult:
         return (f"<RawResult mac={self.mac_address} n={self.samples.size} "
                 f"center={self.center_frequency} sample_rate={self.sample_rate} "
                 f"gps_lock={self.gps_lock}>")
-
-
-class SweepIncomplete(Exception):
-    """A sweep stopped early. .results holds the windows captured before it did."""
-
-    def __init__(self, results, error):
-        super().__init__(f"sweep stopped after {len(results)} windows: {error}")
-        self.results = results
-        self.error = error
 
 
 class SweepResult(list):
@@ -172,45 +199,44 @@ class SweepStream:
             warnings.warn(f"sweep incomplete after {len(self.results)} windows: {self.error}")
 
 
-def _query(**params):
-    """Drop None (so server defaults apply); send bools as true/false."""
-    query = {}
-    for key, value in params.items():
-        if value is None:
-            continue
-        query[key] = ("true" if value else "false") if isinstance(value, bool) else value
-    return query
+class SweepIncomplete(Exception):
+    """A sweep stopped early. .results holds the windows captured before it did."""
+
+    def __init__(self, results, error):
+        super().__init__(f"sweep stopped after {len(results)} windows: {error}")
+        self.results = results
+        self.error = error
 
 
-def _raise_api_error(resp):
-    """Raise requests.exceptions.HTTPError carrying the server's {"detail": ...}."""
-    try:
-        body = resp.json()
-    except ValueError:
-        body = {"detail": resp.text}
-    detail = body.get("detail") if isinstance(body, dict) else body
-    raise requests.exceptions.HTTPError(
-        f"{resp.status_code} from {resp.url}: {detail}", response=resp
-    )
+# --- Node status -------------------------------------------------------------
+
+def get_node(mac_address, base_url=BASE_URL, timeout=10):
+    """Fetch a node's raw status dict (active, last_update, sensors, ...)."""
+    return _get_json(f"{base_url}/node/{mac_address}", timeout=timeout)
 
 
-def _get_json(url, params=None, timeout=10):
+def is_online(mac_address, base_url=BASE_URL, timeout=10):
     """
-    GET `url`, return the JSON body. API errors ({"detail": ...}) are
-    raised as requests.exceptions.HTTPError with the detail in the message.
+    Convenience wrapper answering the Stage 2 "is the node online"
+    question directly from the API's own `active` field, rather than
+    inferring it from timeouts or connection errors.
     """
-    resp = requests.get(url, params=params, timeout=timeout)
-    if not resp.ok:
-        _raise_api_error(resp)
-    body = resp.json()
-    if isinstance(body, dict) and "detail" in body:
-        _raise_api_error(resp)
-    return body
+    return get_node(mac_address, base_url=base_url, timeout=timeout)["active"]
 
 
-def _http_wait(timeout):
-    return timeout + SERVER_GRACE + HTTP_MARGIN
+def nodestats(mac_address, base_url=BASE_URL, timeout=10):
+    """
+    A node's sensors and their capabilities (gain range, frequency range,
+    sample rates, calibration data, ...):
+        [{"type": "sensors.rf.receiver", "capabilities": {...}}]
 
+    As of Oct 2026, of 36 registered nodes: 25 report exactly one
+    sensors.rf.receiver, 11 report no sensors (returns []).
+    """
+    return get_node(mac_address, base_url=base_url, timeout=timeout)["sensors"]
+
+
+# --- Measurements ------------------------------------------------------------
 
 def scan(mac_address, freq=None, span=None, fmin=None, fmax=None, gain=None,
          rbw=None, batch=None, base_url=BASE_URL, timeout=10):
@@ -288,6 +314,16 @@ def sweep(mac_address, fmin=None, fmax=None, freq=None, span=None, gain=None,
     return SweepResult(results, stream.complete, stream.error, stream.segments)
 
 
+# --- Working with results ----------------------------------------------------
+
+def frequency_bins(xstart, xstop, xcount):
+    """
+    Frequency in Hz of each power value, lowest first -- for plotting.
+    Assumes each value sits at its bin's center. Periodograms only.
+    """
+    return numpy.linspace(xstart, xstop, xcount)
+
+
 def join_windows(results):
     """
     Join sweep windows into one (frequencies, data) pair of arrays, in order.
@@ -310,20 +346,6 @@ def join_windows(results):
     if not freq_parts:
         return numpy.array([]), numpy.array([])
     return numpy.concatenate(freq_parts), numpy.concatenate(data_parts)
-
-
-def get_node(mac_address, base_url=BASE_URL, timeout=10):
-    """Fetch a node's raw status dict (active, last_update, sensors, ...)."""
-    return _get_json(f"{base_url}/node/{mac_address}", timeout=timeout)
-
-
-def is_online(mac_address, base_url=BASE_URL, timeout=10):
-    """
-    Convenience wrapper answering the Stage 2 "is the node online"
-    question directly from the API's own `active` field, rather than
-    inferring it from timeouts or connection errors.
-    """
-    return get_node(mac_address, base_url=base_url, timeout=timeout)["active"]
 
 
 if __name__ == "__main__":

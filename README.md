@@ -13,22 +13,22 @@ The module is written against the **new API** (radiohound_app branch
 `api_function_specs`), which is **not deployed yet**. The server at
 `radiohound2.ee.nd.edu` still runs the old API, so `scan()`, `raw()` and
 `sweep()` will fail against it until Randy deploys. Offline tests
-(`test_spec0.py`) pass; live testing comes after the deploy.
+(`test_radiohound.py`) pass; live testing comes after the deploy.
 
 New in this version: span scans, raw time-domain captures, and
 server-stepped sweeps (streamed or node-stitched). All frequencies are Hz.
 
 ## Files
 
-- [spec0.py](spec0.py) — the working code:
+- [radiohound.py](radiohound.py) — the module:
   - `scan()` — one periodogram: zero-span, `freq` + `span`, or `fmin` + `fmax`
   - `raw()` — time-domain samples, returned as a `RawResult`
   - `sweep()` — cover a band window by window (streamed), or node-stitched
     with `fast=True`
   - `join_windows()` — join sweep windows into one pair of arrays
-  - `get_node()`, `is_online()` — node status
-- [test_spec0.py](test_spec0.py) — offline tests with a fake
-  `requests.get`; run `python3 test_spec0.py`.
+  - `get_node()`, `is_online()`, `nodestats()` — node status and capabilities
+- [test_radiohound.py](test_radiohound.py) — offline tests with a fake
+  `requests.get`; run `python3 test_radiohound.py`.
 - `CONTEXT.md` — full project context, findings log and open questions.
   Kept locally; not tracked in this repo.
 
@@ -45,7 +45,7 @@ debugging, and multi-node occupancy mapping — the same pattern as pandas'
 import numpy as np
 import matplotlib.pyplot as plt
 import requests
-from spec0 import scan, raw, sweep, join_windows, is_online, SweepIncomplete
+from radiohound import scan, raw, sweep, join_windows, is_online, SweepIncomplete
 
 MAC = "3484e4f58836"   # WI-Lab, RadioHound board at Notre Dame
 ```
