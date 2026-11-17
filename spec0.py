@@ -1,10 +1,12 @@
 """
-radiohound/core.py -- built against Randy's live API (real scans from
-real nodes, as of Oct 2026)
+radiohound/core.py -- built against Randy's API on the radiohound_app
+branch api_function_specs (Nov 2026; not deployed yet). All frequencies
+are Hz, in requests and responses.
 """
 
 import base64
-import time
+import json
+import warnings
 
 import numpy
 import requests
@@ -16,6 +18,9 @@ BASE_URL = "http://radiohound2.ee.nd.edu:8000/api"
 SERVER_GRACE = 2
 HTTP_MARGIN = 3
 
+# Seconds to open the connection for a streamed sweep; our own pick.
+CONNECT_TIMEOUT = 5
+
 
 def frequency_bins(xstart, xstop, xcount):
     """
@@ -25,17 +30,19 @@ def frequency_bins(xstart, xstop, xcount):
     return numpy.linspace(xstart, xstop, xcount)
 
 
+def _decode(response_json):
+    return numpy.frombuffer(base64.b64decode(response_json["data"]),
+                            dtype=response_json["type"])
+
+
 class ScanResult:
-    """Wraps one scan response into something easy to work with."""
+    """Wraps one periodogram response into something easy to work with."""
 
     def __init__(self, response_json):
         self.raw = response_json
         # Power per frequency bin, watts (per Chris, Oct 2026). Nominal
         # only on nodes without calibration data.
-        self.data = numpy.frombuffer(
-            base64.b64decode(response_json["data"]),
-            dtype=response_json["type"],
-        )
+        self.data = _decode(response_json)
         self.mac_address = response_json["mac_address"]
         self.timestamp = response_json["timestamp"]
         self.center_frequency = response_json["center_frequency"]
@@ -62,52 +69,247 @@ class ScanResult:
                 f"fmin={m.get('fmin')} fmax={m.get('fmax')} gps_lock={self.gps_lock}>")
 
 
+class RawResult:
+    """Wraps one raw (time-domain) capture. No frequency axis."""
+
+    def __init__(self, response_json):
+        self.raw = response_json
+        # Units unconfirmed (asked Randy). Complex dtype on IQ nodes, if any.
+        self.samples = _decode(response_json)
+        self.mac_address = response_json.get("mac_address")
+        self.timestamp = response_json["timestamp"]
+        self.center_frequency = response_json["center_frequency"]
+        self.sample_rate = response_json["sample_rate"]
+        self.gain = response_json.get("gain")
+        self.batch = response_json.get("batch")
+        self.metadata = response_json["metadata"]      # data_type, sample_count, capture_duration_s, real_sampling, calibrated, ...
+        self.requested = response_json["requested"]
+        self.gps_lock = self.metadata.get("gps_lock")
+
+    @property
+    def times(self):
+        """Time in seconds of each sample, from the start of the capture."""
+        return numpy.arange(self.samples.size) / self.sample_rate
+
+    def __repr__(self):
+        return (f"<RawResult mac={self.mac_address} n={self.samples.size} "
+                f"center={self.center_frequency} sample_rate={self.sample_rate} "
+                f"gps_lock={self.gps_lock}>")
+
+
+class SweepIncomplete(Exception):
+    """A sweep stopped early. .results holds the windows captured before it did."""
+
+    def __init__(self, results, error):
+        super().__init__(f"sweep stopped after {len(results)} windows: {error}")
+        self.results = results
+        self.error = error
+
+
+class SweepResult(list):
+    """
+    The windows of a streamed sweep, in order, as ScanResults (not stitched;
+    see join_windows()). .complete: whether every window arrived. .error:
+    the server's reason if not. .segments: windows the server reported sending.
+    """
+
+    def __init__(self, results, complete, error, segments):
+        super().__init__(results)
+        self.complete = complete
+        self.error = error
+        self.segments = segments
+
+
+class SweepStream:
+    """
+    Iterate to get each window's ScanResult as it arrives. Can be iterated
+    once. After iteration finishes, .complete, .error and .segments are set
+    (they stay None if you break out early); .results holds every window so far.
+    """
+
+    def __init__(self, response, strict):
+        self.results = []
+        self.complete = None
+        self.error = None
+        self.segments = None
+        self._response = response
+        self._strict = strict
+        self._iter = self._run()
+
+    def __iter__(self):
+        return self._iter
+
+    def _run(self):
+        ended = False
+        try:
+            for line in self._response.iter_lines():
+                if not line:
+                    continue
+                msg = json.loads(line)
+                if msg["type"] == "segment":
+                    result = ScanResult(msg["result"])
+                    self.results.append(result)
+                    yield result
+                elif msg["type"] == "end":
+                    ended = True
+                    self.complete = msg["complete"]
+                    self.error = msg["error"]
+                    self.segments = msg["segments"]
+                    break
+        except requests.exceptions.RequestException as exc:
+            self.error = f"connection lost mid-sweep ({exc})"
+        finally:
+            self._response.close()
+
+        if not ended:
+            self.complete = False
+            self.error = self.error or "stream ended without an end line (connection dropped?)"
+            self.segments = len(self.results)
+        if not self.complete:
+            if self._strict:
+                raise SweepIncomplete(SweepResult(self.results, False, self.error,
+                                                  self.segments), self.error)
+            warnings.warn(f"sweep incomplete after {len(self.results)} windows: {self.error}")
+
+
+def _query(**params):
+    """Drop None (so server defaults apply); send bools as true/false."""
+    query = {}
+    for key, value in params.items():
+        if value is None:
+            continue
+        query[key] = ("true" if value else "false") if isinstance(value, bool) else value
+    return query
+
+
+def _raise_api_error(resp):
+    """Raise requests.exceptions.HTTPError carrying the server's {"detail": ...}."""
+    try:
+        body = resp.json()
+    except ValueError:
+        body = {"detail": resp.text}
+    detail = body.get("detail") if isinstance(body, dict) else body
+    raise requests.exceptions.HTTPError(
+        f"{resp.status_code} from {resp.url}: {detail}", response=resp
+    )
+
+
 def _get_json(url, params=None, timeout=10):
     """
     GET `url`, return the JSON body. API errors ({"detail": ...}) are
     raised as requests.exceptions.HTTPError with the detail in the message.
     """
     resp = requests.get(url, params=params, timeout=timeout)
-    try:
-        body = resp.json()
-    except ValueError:
-        if resp.ok:
-            raise
-        body = {"detail": resp.text}
-    if not resp.ok or (isinstance(body, dict) and "detail" in body):
-        detail = body.get("detail") if isinstance(body, dict) else body
-        raise requests.exceptions.HTTPError(
-            f"{resp.status_code} from {resp.url}: {detail}", response=resp
-        )
+    if not resp.ok:
+        _raise_api_error(resp)
+    body = resp.json()
+    if isinstance(body, dict) and "detail" in body:
+        _raise_api_error(resp)
     return body
 
 
-def _get_scan(mac_address, params, base_url, timeout):
-    return ScanResult(_get_json(f"{base_url}/scan/{mac_address}", params, timeout))
+def _http_wait(timeout):
+    return timeout + SERVER_GRACE + HTTP_MARGIN
 
 
-def scan(mac_address, freq, gain=None, base_url=BASE_URL, timeout=10,
-         rbw=None, batch=None):
+def scan(mac_address, freq=None, span=None, fmin=None, fmax=None, gain=None,
+         rbw=None, batch=None, base_url=BASE_URL, timeout=10):
     """
-    Request one scan and return a ScanResult.
+    One periodogram as a ScanResult. Frequencies in Hz. Give one of:
+      freq             zero-span: the node's native window centered on freq
+      freq + span      freq +/- span/2, stitched on the node
+      fmin + fmax      as given, stitched on the node
+    Other shapes are rejected by the server (422 HTTPError).
 
-    freq: center frequency in Hz (converted to MHz for the API).
     gain, rbw, batch: omitted when None, so server defaults apply
-        (gain=1, rbw=23437.5, batch=0 as of Oct 2026). gain and batch
-        must be whole numbers.
-    timeout: whole seconds the node gets to respond.
-
-    Always zero-span: returns the node's native window centered on freq.
+        (gain=1, rbw=23437.5, batch=0). gain and batch must be whole numbers.
+        batch is a tag echoed back in result.batch.
+    timeout: whole seconds for the whole request; raise it for wide spans.
     """
-    params = {"freq": freq / 1e6, "timeout": timeout}
-    if gain is not None:
-        params["gain"] = gain
-    if rbw is not None:
-        params["rbw"] = rbw
-    if batch is not None:
-        params["batch"] = batch
-    return _get_scan(mac_address, params, base_url,
-                     timeout + SERVER_GRACE + HTTP_MARGIN)
+    params = _query(freq=freq, span=span, fmin=fmin, fmax=fmax, gain=gain,
+                    rbw=rbw, batch=batch, timeout=timeout)
+    return ScanResult(_get_json(f"{base_url}/scan/{mac_address}", params,
+                                _http_wait(timeout)))
+
+
+def raw(mac_address, freq, gain=None, n_samples=None, calibrated=None,
+        batch=None, base_url=BASE_URL, timeout=10):
+    """
+    Raw time-domain samples centered on freq (Hz), as a RawResult.
+
+    n_samples: defaults to the node's own default.
+    calibrated: server default False.
+    Out-of-range freq or n_samples is rejected on the node and arrives as
+    a 504 HTTPError, same as a node that didn't answer.
+    """
+    params = _query(freq=freq, gain=gain, n_samples=n_samples,
+                    calibrated=calibrated, batch=batch, timeout=timeout)
+    return RawResult(_get_json(f"{base_url}/scan/{mac_address}/raw", params,
+                               _http_wait(timeout)))
+
+
+def sweep(mac_address, fmin=None, fmax=None, freq=None, span=None, gain=None,
+          rbw=None, batch=None, doBlock=True, fast=False, strict=False,
+          base_url=BASE_URL, timeout=10):
+    """
+    Cover a band (fmin + fmax, or freq + span, in Hz). The server steps
+    through it one capture window at a time.
+
+    fast=False (default): windows are streamed back as they are captured.
+        doBlock=True  -> SweepResult (a list of ScanResults) once done
+        doBlock=False -> SweepStream; iterate it to get each window live
+        timeout is per window. The sweep stops at the first failed window;
+        earlier windows are kept. If it stops early, a warning is issued,
+        or with strict=True, SweepIncomplete (carrying .results) is raised.
+    fast=True: the node steps and stitches; returns one ScanResult. timeout
+        covers the whole band, and a failure returns no data (504).
+
+    Errors before the first window (unknown node, bad params, probe scan
+    timed out) are raised as HTTPError in both modes, when sweep() is called.
+    """
+    url = f"{base_url}/scan/{mac_address}/sweep"
+    params = _query(fmin=fmin, fmax=fmax, freq=freq, span=span, gain=gain,
+                    rbw=rbw, batch=batch, timeout=timeout, stream=not fast)
+    if fast:
+        return ScanResult(_get_json(url, params, _http_wait(timeout)))
+
+    # The read timeout applies between chunks: covers the probe and each window.
+    resp = requests.get(url, params=params, stream=True,
+                        timeout=(CONNECT_TIMEOUT, _http_wait(timeout)))
+    if not resp.ok:
+        try:
+            _raise_api_error(resp)
+        finally:
+            resp.close()
+    stream = SweepStream(resp, strict)
+    if not doBlock:
+        return stream
+    results = list(stream)
+    return SweepResult(results, stream.complete, stream.error, stream.segments)
+
+
+def join_windows(results):
+    """
+    Join sweep windows into one (frequencies, data) pair of arrays, in order.
+    Neighbouring windows share an edge point, so a window's first point is
+    dropped when it matches the previous window's last frequency (within
+    1 Hz, for float rounding; bins are kHz apart). Array joining only: no
+    overlap handling, no trimming to the requested band, no level matching.
+    For a node-stitched spectrum, use sweep(..., fast=True) instead.
+    """
+    freq_parts, data_parts = [], []
+    last = None
+    for result in results:
+        f, d = result.frequencies, result.data
+        if last is not None and f.size and abs(f[0] - last) <= 1:
+            f, d = f[1:], d[1:]
+        if f.size:
+            last = f[-1]
+        freq_parts.append(f)
+        data_parts.append(d)
+    if not freq_parts:
+        return numpy.array([]), numpy.array([])
+    return numpy.concatenate(freq_parts), numpy.concatenate(data_parts)
 
 
 def get_node(mac_address, base_url=BASE_URL, timeout=10):
@@ -122,80 +324,6 @@ def is_online(mac_address, base_url=BASE_URL, timeout=10):
     inferring it from timeouts or connection errors.
     """
     return get_node(mac_address, base_url=base_url, timeout=timeout)["active"]
-
-
-def sweep_beta(mac_address, fmin, fmax, gain=None, rbw=None, doBlock=True,
-               base_url=BASE_URL, timeout=10):
-    """
-    Cover [fmin, fmax] Hz with back-to-back zero-span scans. Returns a
-    list of ScanResult (doBlock=True) or a generator (doBlock=False).
-    A failed step is printed and skipped.
-
-    Beta: works with today's API, on these assumptions:
-    - API is zero-span only: each scan is one capture centered on freq.
-    - Capture width is read from a probe scan at fmin and assumed constant
-      across the band (24 MHz at all four frequencies tried, 100 MHz-4.4 GHz).
-    - Neighbouring captures share one edge point; results are not stitched.
-    - Captures are sequential (~0.3 s apart), not simultaneous.
-    - The last capture can extend past fmax.
-    - The 0.1 s pause is copied from Icarus's sweep; need unconfirmed.
-    - Only tested on node 3484e4f58836.
-    """
-    def _run():
-        probe = scan(mac_address, fmin, gain=gain, base_url=base_url,
-                     timeout=timeout, rbw=rbw)
-        width = probe.metadata["fmax"] - probe.metadata["fmin"]
-        edge = fmin
-        while edge < fmax:
-            try:
-                yield scan(mac_address, edge + width / 2, gain=gain,
-                           base_url=base_url, timeout=timeout, rbw=rbw)
-            except requests.exceptions.RequestException as exc:
-                print(f"WARNING: scan at {edge}-{edge + width} Hz "
-                      f"failed ({exc}), skipping")
-            edge += width
-            time.sleep(0.1)
-
-    if doBlock:
-        return list(_run())
-    return _run()
-
-
-# ---------------------------------------------------------------------------
-# sweep() -- the real one. NOT IMPLEMENTED: every "ASK RANDY" below is a
-# decision about what the API should take in / send back.
-# ---------------------------------------------------------------------------
-# def sweep(mac_address, fmin, fmax, gain=None, rbw=None, doBlock=True,
-#           base_url=BASE_URL, timeout=10):
-#     """One spectrum covering [fmin, fmax] Hz."""
-#
-#     # ASK RANDY 1 -- request shape: fmin/fmax, freq/span, or a separate
-#     #   /sweep endpoint? MHz (like freq today) or Hz (like everything returned)?
-#     params = {"fmin": fmin, "fmax": fmax}
-#
-#     # ASK RANDY 2 -- who steps and stitches: node (Icarus's periodogram
-#     #   already joins captures for wide spans), server, or this client?
-#     #   Node/server -> one request, as below. Client -> needs 3.
-#     # ASK RANDY 3 -- capture width per node: can capabilities report it?
-#     #   (24 MHz on the RadioHound board, 2.56 MHz on an RTL-SDR; not
-#     #   derivable from sample rate.)
-#
-#     # ASK RANDY 4 -- gain: valid values (node reports -10..35 step 3, API
-#     #   accepted 1 and 99)? Default? One gain for the whole sweep?
-#     # ANSWERED 5 -- batch is unused (dashboard code says so). Drop it?
-#
-#     # ASK RANDY 6 -- timing: timeout for a long sweep (server waits
-#     #   timeout + 2)? Settle time between retunes? Node busy/locked?
-#     result = _get_scan(mac_address, params, base_url, timeout)
-#
-#     # ASK RANDY 7 -- response shape: one array with xstart/xstop/xcount for
-#     #   the whole span, or a list of segments? Per-segment timestamps?
-#     #   Size limit for wide spans?
-#     # ASK RANDY 8 -- units answered: watts per bin. Tag units/calibrated
-#     #   in each payload? Gain-corrected?
-#     # ASK RANDY 9 -- partial failure mid-sweep: what comes back?
-#     # ASK RANDY 10 -- streaming results as they arrive (doBlock=False)?
-#     return result
 
 
 if __name__ == "__main__":

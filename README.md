@@ -7,25 +7,28 @@ dashboard and hand-rolled MQTT as the way to run experiments.
 
 Owner: Jordan Boskovich · RadioHound STRAND, Fall 2026.
 
-## Status (Oct 10, 2026)
+## Status (Nov 17, 2026)
 
-**Stage 1 works against the live API**: `scan()` returns real data from a
-real node at `http://radiohound2.ee.nd.edu:8000/api/`. Tested on one node
-(`3484e4f58836`) so far.
+The module is written against the **new API** (radiohound_app branch
+`api_function_specs`), which is **not deployed yet**. The server at
+`radiohound2.ee.nd.edu` still runs the old API, so `scan()`, `raw()` and
+`sweep()` will fail against it until Randy deploys. Offline tests
+(`test_spec0.py`) pass; live testing comes after the deploy.
 
-Sweeps work in a beta form only (`sweep_beta()`). The API currently
-supports single zero-span scans, so the real `sweep()` is a commented-out
-draft in `spec0.py` listing the decisions still to be made with Randy.
+New in this version: span scans, raw time-domain captures, and
+server-stepped sweeps (streamed or node-stitched). All frequencies are Hz.
 
 ## Files
 
 - [spec0.py](spec0.py) — the working code:
-  - `scan()` — one scan from one node, returned as a `ScanResult`
+  - `scan()` — one periodogram: zero-span, `freq` + `span`, or `fmin` + `fmax`
+  - `raw()` — time-domain samples, returned as a `RawResult`
+  - `sweep()` — cover a band window by window (streamed), or node-stitched
+    with `fast=True`
+  - `join_windows()` — join sweep windows into one pair of arrays
   - `get_node()`, `is_online()` — node status
-  - `sweep_beta()` — covers a band with back-to-back scans
-  - commented-out `sweep()` — open API design questions
-- [stage0_ideas.py](stage0_ideas.py) — draft interface ideas: `nodestats()`,
-  `select()` / `Node` (working), `getnodes()`, `Node.getjoblist()` (stubs).
+- [test_spec0.py](test_spec0.py) — offline tests with a fake
+  `requests.get`; run `python3 test_spec0.py`.
 - `CONTEXT.md` — full project context, findings log and open questions.
   Kept locally; not tracked in this repo.
 
@@ -36,28 +39,98 @@ thin, specialized layers per use case — calibration/sweep, fast
 debugging, and multi-node occupancy mapping — the same pattern as pandas'
 `DataFrame` plus its accessors.
 
-## Quick usage
-
-All frequencies are in **Hz**.
+## Examples
 
 ```python
+import numpy as np
 import matplotlib.pyplot as plt
-from spec0 import scan, is_online, sweep_beta
+import requests
+from spec0 import scan, raw, sweep, join_windows, is_online, SweepIncomplete
 
-result = scan("<mac_address>", freq=4444e6, gain=4)
-print(result)            # summary
-print(result.data)       # numpy array of power per bin, in watts
-print(result.metadata)   # fmin, fmax, nfft, xcount, ...
-
-plt.plot(result.frequencies, result.data)   # frequency (Hz) of each value
-
-print(is_online("<mac_address>"))
-
-results = sweep_beta("<mac_address>", fmin=4400e6, fmax=4448e6)
+MAC = "3484e4f58836"   # WI-Lab, RadioHound board at Notre Dame
 ```
 
-Each scan returns the node's native window centered on `freq` (24 MHz wide
-on the node tested). Errors from the API, such as an unknown node, are
-raised as `requests.exceptions.HTTPError` with the server's message.
+**1. Check the node before an experiment**
+```python
+if not is_online(MAC):
+    raise SystemExit("node is offline")
+```
 
-Requires `numpy` and `requests`.
+**2. Quick look at one frequency (zero-span, the node's native window)**
+```python
+r = scan(MAC, freq=915e6)            # Hz; about 24 MHz around 915 MHz on this node
+plt.plot(r.frequencies / 1e6, 10 * np.log10(r.data) + 30)   # data is watts per bin -> dBm
+plt.xlabel("MHz"); plt.ylabel("dBm"); plt.show()
+```
+
+**3. One spectrum of a whole band, stitched on the node**
+```python
+r = scan(MAC, fmin=902e6, fmax=928e6, timeout=20)   # or freq=915e6, span=26e6
+print(r.data.size, "bins from", r.metadata["fmin"], "to", r.metadata["fmax"])
+```
+
+**4. Raw time-domain capture, saved for offline processing**
+```python
+cap = raw(MAC, freq=915e6, n_samples=65536)
+np.save("capture_915MHz.npy", cap.samples)
+print(cap.sample_rate, cap.metadata["capture_duration_s"])
+```
+
+**5. Streaming sweep: plot live, stop early when a signal shows up**
+```python
+threshold_w = 1e-9
+for w in sweep(MAC, fmin=2.4e9, fmax=2.5e9, doBlock=False):
+    plt.plot(w.frequencies / 1e6, w.data); plt.pause(0.01)
+    if w.data.max() > threshold_w:
+        print("signal near", w.frequencies[w.data.argmax()] / 1e6, "MHz")
+        break
+```
+
+**6. Full sweep, then join the windows into one spectrum**
+```python
+result = sweep(MAC, fmin=4.4e9, fmax=4.448e9)        # warns if any window failed
+print("complete:", result.complete, "windows:", len(result))
+freqs, power = join_windows(result)
+```
+
+**7. Fast sweep: the node steps and stitches, one result**
+```python
+r = sweep(MAC, fmin=4.4e9, fmax=4.448e9, fast=True, timeout=20)
+```
+
+**8. Tag repeated measurements with `batch` (e.g. a gain series)**
+```python
+results = {}
+for batch, gain in enumerate([0, 3, 6, 9]):
+    r = scan(MAC, freq=915e6, gain=gain, batch=batch)
+    results[gain] = r
+    assert r.batch == batch       # echoed back by the node
+```
+
+**9. Error handling for long unattended runs**
+```python
+try:
+    result = sweep(MAC, fmin=24e6, fmax=1.7e9, strict=True)
+except SweepIncomplete as e:
+    print("sweep stopped early:", e.error)
+    result = e.results            # keep what was captured
+except requests.exceptions.HTTPError as e:
+    print("API error:", e)        # 404 unknown node, 504 node didn't answer, 422 bad params
+```
+
+Notes:
+
+- `timeout` is whole seconds. For `scan()` and `sweep(fast=True)` it covers
+  the whole request, so raise it for wide bands; for a streamed `sweep()`
+  it applies per window.
+- A streamed sweep stops at the first failed window and keeps the earlier
+  ones. By default you get a warning and the partial result
+  (`result.complete` is `False`); `strict=True` raises `SweepIncomplete`
+  instead.
+- Node-side rejections (out-of-range frequency, bad `n_samples`) arrive as
+  a 504, the same as a node that didn't answer.
+- The units of `raw()` samples are not confirmed yet.
+
+## Requirements
+
+`numpy` and `requests`; `matplotlib` for the plotting examples.
